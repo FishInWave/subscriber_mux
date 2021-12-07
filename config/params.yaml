@@ -1,0 +1,3 @@
+GPS:
+  GPS_topic: /gps/fix
+  GPS_odom_topic: /odometry/gps
