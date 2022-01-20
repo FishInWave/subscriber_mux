@@ -9,16 +9,19 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/exact_time.h>
-#include <utils/rslidar_utils.hpp>
+#include <utils/lidar_utils.hpp>
 #include <utils/time_utils.hpp>
 #include <sensor_msgs/PointCloud2.h>
 #include <deque>
 #include <mutex>
 #include <thread>
 #include <chrono>
-
+#include <pcl_conversions/pcl_conversions.h>
+#include <sensor_msgs/FluidPressure.h>
+#include <geometry_msgs/PointStamped.h>
+#include <std_msgs/Float32.h>
 using namespace std;
-using ExactTime = message_filters::sync_policies::ExactTime<sensor_msgs::PointCloud2, sensor_msgs::PointCloud2>;
+using ExactTime = message_filters::sync_policies::ExactTime<sensor_msgs::FluidPressure, geometry_msgs::PointStamped>;
 class SubscriberMux
 {
 public:
@@ -27,8 +30,11 @@ public:
     ros::Subscriber GPS_odom_sub_;
     ros::Subscriber raw_pointcloud_sub_, deskewed_pointcloud_sub_;
 
-    // message_filters::Subscriber<sensor_msgs::PointCloud2> raw_points_sub_;
-    // message_filters::Subscriber<sensor_msgs::PointCloud2> deskewed_points_sub_;
+    //气压相关
+    // ros::Subscriber pressure_sub_;
+    // ris::Subscriber height_sub_;
+    ros::Publisher math_height_pub_;
+    ros::Publisher delta_height_pub_;
 
     ros::Publisher raw_pub_, deskew_pub_;
 
@@ -55,15 +61,18 @@ public:
         raw_pointcloud_sub_ = nh_.subscribe<sensor_msgs::PointCloud2>("/points_raw", 100, &SubscriberMux::raw_callback, this, ros::TransportHints().tcpNoDelay());
         deskewed_pointcloud_sub_ = nh_.subscribe<sensor_msgs::PointCloud2>("/lio_sam/deskew/cloud_deskewed", 100, &SubscriberMux::deskewed_callback, this, ros::TransportHints().tcpNoDelay());
 
-        // message_filters::Subscriber<sensor_msgs::PointCloud2> raw_points_sub_(nh_, "/points_raw", 100);
-        // message_filters::Subscriber<sensor_msgs::PointCloud2> deskewed_points_sub_(nh_, "/lio_sam/deskew/cloud_deskewed", 100);
-        // message_filters::Synchronizer<ExactTime> sync(ExactTime(200), raw_points_sub_, deskewed_points_sub_);
-        // sync.registerCallback(boost::bind(&SubscriberMux::cloud_sync_callback, this, _1, _2));
+        message_filters::Subscriber<geometry_msgs::PointStamped> height_sub_(nh_,"/zed2/zed_node/height",100);
+        message_filters::Subscriber<sensor_msgs::FluidPressure> pressure_sub_(nh_,"/zed2/zed_node/atm_press",100);
+        message_filters::Synchronizer<ExactTime> sync(ExactTime(200), pressure_sub_, height_sub_);
+        sync.registerCallback(boost::bind(&SubscriberMux::pressure_callback,this,_1,_2));
+        math_height_pub_ = nh_.advertise<geometry_msgs::PointStamped>("math_height",10);
+        delta_height_pub_ = nh_.advertise<geometry_msgs::PointStamped>("delta_height",10);
 
         raw_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("raw", 10);
         deskew_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("deskew", 10);
 
         outputSrv_ = nh_.advertiseService("subscriber_mux/output_frequency", &SubscriberMux::outputService, this);
+        ros::spin();
     }
 
     void raw_callback(const sensor_msgs::PointCloud2ConstPtr &raw)
@@ -72,6 +81,24 @@ public:
             lock_guard<mutex> lock(raw_mutex_);
             raw_deque_.push_back(*raw);
         }
+        pcl::PointCloud<VelodynePointXYZIRT> cloud;
+        sensor_msgs::PointCloud2 cloud_msg(*raw);
+        pcl::moveFromROSMsg(cloud_msg,cloud);
+        vector<vector<float>> horizon(64);
+        for(auto point : cloud){
+            float angle = atan2(point.y,point.x)*180/M_PI;
+            horizon.at(point.ring).push_back(angle);
+        }
+        for(int i = 0; i < horizon.size(); ++i){
+            vector<float> ring = horizon[i];
+            sort(ring.begin(),ring.end(),less<float>());
+            cout << "ring number: " << i << "ring points: " << ring.size() << endl;
+            for(int j = 1 ; j < ring.size();j++){
+                cout << ring[j]-ring[j-1] << " " ;
+            }
+            cout << endl;
+        }
+
     }
 
     void deskewed_callback(const sensor_msgs::PointCloud2ConstPtr &msg)
@@ -118,20 +145,29 @@ public:
 
         return;
     }
-    // 同步无法用
-    // void cloud_sync_callback(const sensor_msgs::PointCloud2ConstPtr &raw, const sensor_msgs::PointCloud2ConstPtr &deskewed)
-    // {
-    //     ROS_INFO_STREAM ("hello");
-    //     if (raw->header.stamp == deskewed->header.stamp)
-    //     {
-    //         raw_pub_.publish(*raw);
-    //         deskew_pub_.publish(*deskewed);
-    //     }
-    //     else
-    //     {
-    //         ROS_INFO_STREAM("raw stamp: " << raw->header.stamp << " deskewed stamp: " << deskewed->header.stamp);
-    //     }
-    // }
+    void pressure_callback(const sensor_msgs::FluidPressureConstPtr &pressure_msgs, const geometry_msgs::PointStampedConstPtr &height_msgs)
+    {
+        static float h0 = 0;
+        
+        static float P0 = 0;
+        float P = pressure_msgs->fluid_pressure;
+        float h ;
+        if(P0 == 0){
+            P0 = P;
+            h = h0;
+        }else{
+            h = h0 + 18435.66*(1+15.0/273.15)*log10(P0/P);
+        }
+        float delta_h = h - height_msgs->point.z;
+        geometry_msgs::PointStamped math_height,delta_height;
+        math_height = *height_msgs;
+        math_height.point.z = h;
+        delta_height = *height_msgs;
+        delta_height.point.z = delta_h;
+        math_height_pub_.publish(math_height);
+        delta_height_pub_.publish(delta_height);
+        
+    }
 
     bool outputService(subscriber_mux::output_frequencyRequest &req, subscriber_mux::output_frequencyResponse &res)
     {

@@ -4,7 +4,7 @@ project(subscriber_mux)
 ## Compile as C++11, supported in ROS Kinetic and newer
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++11")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -pthread")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -pthread")
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
